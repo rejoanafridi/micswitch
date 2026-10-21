@@ -1,15 +1,19 @@
 // MicSwitch — menu bar toggle for Bluetooth headsets on macOS.
 //
-// Mic OFF (🎧): system input = a non-Bluetooth device (built-in mic or BlackHole),
+// Works with any Bluetooth headset: TWS earbuds, neckbands, AirPods, over-ears.
+//
+// Mic OFF (🎧): system input = a silent device (BlackHole, or a muted Mac mic),
 //               so the headset stays in A2DP (HD stereo).
-// Mic ON  (🎙️): system input = the headset mic, so it switches to HFP (mono, with mic).
+// Mic ON  (🎙️): system input = the chosen mic. The headset mic switches the headset
+//               to HFP (call mode); a Mac/USB mic keeps HD sound.
 //
 // Apps (Discord, Meet, Zoom...) must use the "Default" / "System default" input.
-// Hotkey: Control + Option + M
+// Click the menu bar icon or press Control + Option + M to toggle.
 
 import Cocoa
 import CoreAudio
 import Carbon.HIToolbox
+import ServiceManagement
 
 // MARK: - CoreAudio helpers
 
@@ -30,15 +34,18 @@ func allDevices() -> [AudioDeviceID] {
     return ids
 }
 
-func deviceName(_ id: AudioDeviceID) -> String {
-    var a = addr(kAudioObjectPropertyName)
-    var name: CFString = "" as CFString
+func stringProperty(_ id: AudioObjectID, _ sel: AudioObjectPropertySelector) -> String? {
+    var a = addr(sel)
+    var value: CFString = "" as CFString
     var size = UInt32(MemoryLayout<CFString>.size)
-    let status = withUnsafeMutablePointer(to: &name) {
+    let status = withUnsafeMutablePointer(to: &value) {
         AudioObjectGetPropertyData(id, &a, 0, nil, &size, $0)
     }
-    return status == noErr ? name as String : "?"
+    return status == noErr ? value as String : nil
 }
+
+func deviceName(_ id: AudioDeviceID) -> String { stringProperty(id, kAudioObjectPropertyName) ?? "Unknown" }
+func deviceUID(_ id: AudioDeviceID) -> String { stringProperty(id, kAudioDevicePropertyDeviceUID) ?? "" }
 
 func transportType(_ id: AudioDeviceID) -> UInt32 {
     var a = addr(kAudioDevicePropertyTransportType)
@@ -51,6 +58,13 @@ func transportType(_ id: AudioDeviceID) -> UInt32 {
 func isBluetooth(_ id: AudioDeviceID) -> Bool {
     let t = transportType(id)
     return t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE
+}
+
+/// Virtual / aggregate devices (BlackHole, Zoom's, Teams', ...): never a real microphone.
+func isVirtual(_ id: AudioDeviceID) -> Bool {
+    let t = transportType(id)
+    return t == kAudioDeviceTransportTypeVirtual || t == kAudioDeviceTransportTypeAggregate
+        || t == kAudioDeviceTransportTypeAutoAggregate
 }
 
 func channelCount(_ id: AudioDeviceID, _ scope: AudioObjectPropertyScope) -> Int {
@@ -75,131 +89,355 @@ func getDefault(_ sel: AudioObjectPropertySelector) -> AudioDeviceID {
 
 @discardableResult
 func setDefault(_ sel: AudioObjectPropertySelector, _ id: AudioDeviceID) -> Bool {
+    if getDefault(sel) == id { return true }
     var a = addr(sel)
     var dev = id
     return AudioObjectSetPropertyData(systemObject, &a, 0, nil,
                                       UInt32(MemoryLayout<AudioDeviceID>.size), &dev) == noErr
 }
 
-/// Mutes/unmutes a device's input so the "Mic OFF" device sends pure silence.
-func setInputMuted(_ id: AudioDeviceID, _ muted: Bool) {
-    var a = addr(kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput)
+private func isSettable(_ id: AudioDeviceID, _ a: inout AudioObjectPropertyAddress) -> Bool {
     var settable: DarwinBoolean = false
-    if AudioObjectHasProperty(id, &a),
-       AudioObjectIsPropertySettable(id, &a, &settable) == noErr, settable.boolValue {
-        var v: UInt32 = muted ? 1 : 0
-        AudioObjectSetPropertyData(id, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+    return AudioObjectHasProperty(id, &a)
+        && AudioObjectIsPropertySettable(id, &a, &settable) == noErr && settable.boolValue
+}
+
+/// Mutes/unmutes a device's input. Falls back to input volume 0 when there is no mute switch.
+final class InputMuter {
+    private var savedVolume: [AudioDeviceID: Float32] = [:]
+
+    func set(_ id: AudioDeviceID, muted: Bool) {
+        var m = addr(kAudioDevicePropertyMute, kAudioDevicePropertyScopeInput)
+        if isSettable(id, &m) {
+            var v: UInt32 = muted ? 1 : 0
+            AudioObjectSetPropertyData(id, &m, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+            return
+        }
+        for element in [kAudioObjectPropertyElementMain, 1, 2] {
+            var a = addr(kAudioDevicePropertyVolumeScalar, kAudioDevicePropertyScopeInput, element)
+            guard isSettable(id, &a) else { continue }
+            var size = UInt32(MemoryLayout<Float32>.size)
+            if muted {
+                var current: Float32 = 0
+                AudioObjectGetPropertyData(id, &a, 0, nil, &size, &current)
+                if current > 0 { savedVolume[id] = current }
+                var zero: Float32 = 0
+                AudioObjectSetPropertyData(id, &a, 0, nil, size, &zero)
+            } else if let restore = savedVolume[id] {
+                var v = restore
+                AudioObjectSetPropertyData(id, &a, 0, nil, size, &v)
+            }
+        }
+        if !muted { savedVolume[id] = nil }
+    }
+
+    func unmuteAll() { savedVolume.keys.forEach { set($0, muted: false) } }
+}
+
+// MARK: - Devices
+
+/// One physical Bluetooth headset. macOS often lists its mic and speaker as two devices
+/// that share the Bluetooth address in their UID ("74-05-1D-21-B6-9B:input" / ":output").
+struct Headset {
+    let key: String
+    let name: String
+    let output: AudioDeviceID
+    let input: AudioDeviceID?
+}
+
+func headsetKey(_ id: AudioDeviceID) -> String {
+    let uid = deviceUID(id)
+    if let colon = uid.lastIndex(of: ":"), colon != uid.startIndex { return String(uid[..<colon]) }
+    return uid.isEmpty ? deviceName(id) : uid
+}
+
+func connectedHeadsets() -> [Headset] {
+    let bt = allDevices().filter(isBluetooth)
+    let inputs = bt.filter { channelCount($0, kAudioDevicePropertyScopeInput) > 0 }
+    return bt.filter { channelCount($0, kAudioDevicePropertyScopeOutput) > 0 }.map { out in
+        let key = headsetKey(out)
+        let input = inputs.first { $0 == out } ?? inputs.first { headsetKey($0) == key }
+            ?? inputs.first { deviceName($0) == deviceName(out) }
+        return Headset(key: key, name: deviceName(out), output: out, input: input)
     }
 }
 
-// MARK: - Device selection
-
-let preferredHeadsetName = "Bullets"   // falls back to any Bluetooth headset
-
-func pickBluetooth(_ scope: AudioObjectPropertyScope) -> AudioDeviceID? {
-    let bt = allDevices().filter { isBluetooth($0) && channelCount($0, scope) > 0 }
-    return bt.first { deviceName($0).localizedCaseInsensitiveContains(preferredHeadsetName) } ?? bt.first
+/// Real, non-Bluetooth microphones: built-in, USB, audio interfaces.
+func macMicrophones() -> [AudioDeviceID] {
+    allDevices().filter {
+        !isBluetooth($0) && !isVirtual($0) && channelCount($0, kAudioDevicePropertyScopeInput) > 0
+    }
 }
 
-/// A non-Bluetooth input: built-in mic first, then BlackHole, then anything else.
-func pickSilentInput() -> AudioDeviceID? {
-    let inputs = allDevices().filter { !isBluetooth($0) && channelCount($0, kAudioDevicePropertyScopeInput) > 0 }
-    return inputs.first { transportType($0) == kAudioDeviceTransportTypeBuiltIn }
-        ?? inputs.first { deviceName($0).localizedCaseInsensitiveContains("BlackHole") }
-        ?? inputs.first
+func blackHole() -> AudioDeviceID? {
+    allDevices().first {
+        deviceName($0).localizedCaseInsensitiveContains("BlackHole")
+            && channelCount($0, kAudioDevicePropertyScopeInput) > 0
+    }
+}
+
+// MARK: - Settings
+
+enum Settings {
+    private static let d = UserDefaults.standard
+    /// Bluetooth address of the headset the user picked; nil = whatever is playing sound.
+    static var headsetKey: String? {
+        get { d.string(forKey: "headsetKey") }
+        set { d.set(newValue, forKey: "headsetKey") }
+    }
+    /// UID of the Mac/USB mic to talk with; nil = the headset's own mic.
+    static var talkMicUID: String? {
+        get { d.string(forKey: "talkMicUID") }
+        set { d.set(newValue, forKey: "talkMicUID") }
+    }
 }
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared: AppDelegate?
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    private let stateItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-    private let toggleItem = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "m")
+    private let menu = NSMenu()
+    private let muter = InputMuter()
     private var hotKeyRef: EventHotKeyRef?
     private var micLive = false
-    private var mutedSilentDevice: AudioDeviceID?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
 
-        toggleItem.keyEquivalentModifierMask = [.control, .option]
-        toggleItem.target = self
-        stateItem.isEnabled = false
-        let menu = NSMenu()
-        menu.addItem(stateItem)
-        menu.addItem(.separator())
-        menu.addItem(toggleItem)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "About MicSwitch", action: #selector(showAbout), keyEquivalent: ""))
-        menu.items.last?.target = self
-        menu.addItem(NSMenuItem(title: "GitHub…", action: #selector(openGitHub), keyEquivalent: ""))
-        menu.items.last?.target = self
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit MicSwitch", action: #selector(quit), keyEquivalent: "q"))
-        menu.items.last?.target = self
-        statusItem.menu = menu
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(statusItemClicked)
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        menu.delegate = self
 
         registerHotKey()
-        watchDefaultInput()
-        setMic(live: false, sound: false)
+        watchAudioDevices()
+        apply(live: false)
+        SetupGuide.showIfFirstLaunch(needsBlackHole: needsBlackHole)
     }
 
-    @objc func toggle() { setMic(live: !micLive, sound: true) }
+    func applicationWillTerminate(_ notification: Notification) { muter.unmuteAll() }
 
-    private func setMic(live: Bool, sound: Bool) {
-        let btOut = pickBluetooth(kAudioDevicePropertyScopeOutput)
+    // MARK: Picking devices
+
+    private var activeHeadset: Headset? {
+        let all = connectedHeadsets()
+        if let key = Settings.headsetKey, let picked = all.first(where: { $0.key == key }) { return picked }
+        let output = getDefault(kAudioHardwarePropertyDefaultOutputDevice)
+        return all.first { $0.output == output } ?? all.first
+    }
+
+    /// The mic used for Mic ON, if the user chose a Mac/USB mic and it is plugged in.
+    private var talkMic: AudioDeviceID? {
+        guard let uid = Settings.talkMicUID else { return nil }
+        return macMicrophones().first { deviceUID($0) == uid }
+    }
+
+    /// Input used for Mic OFF: BlackHole is truly silent; otherwise a Mac mic (muted).
+    private var silentInput: AudioDeviceID? { blackHole() ?? macMicrophones().first }
+
+    private var needsBlackHole: Bool { silentInput == nil }
+
+    // MARK: Switching
+
+    @objc func toggle() {
+        if apply(live: !micLive) { showHUD() }
+    }
+
+    /// Routes the default input for the requested state. Returns false if it could not.
+    @discardableResult
+    private func apply(live: Bool, interactive: Bool = true) -> Bool {
+        let headset = activeHeadset
 
         if live {
-            guard let btIn = pickBluetooth(kAudioDevicePropertyScopeInput) else {
-                alert("Bluetooth headset mic not found. Is the neckband connected?")
-                return
+            if let mic = talkMic {
+                muter.set(mic, muted: false)
+                setDefault(kAudioHardwarePropertyDefaultInputDevice, mic)
+            } else if let input = headset?.input {
+                setDefault(kAudioHardwarePropertyDefaultInputDevice, input)
+            } else {
+                if interactive {
+                    alert(headset == nil
+                          ? "No Bluetooth headset is connected.\n\nConnect your earbuds or neckband, then try again."
+                          : "“\(headset!.name)” has no microphone.\n\nRight-click the menu bar icon → Talk Using, and pick your Mac's microphone.")
+                }
+                return false
             }
             micLive = true
-            setDefault(kAudioHardwarePropertyDefaultInputDevice, btIn)
         } else {
-            guard let silent = pickSilentInput() else {
-                alert("No non-Bluetooth input device found.\n\nThis Mac has no built-in mic. Install the free BlackHole driver, then reopen MicSwitch:\n\nbrew install blackhole-2ch")
+            guard let silent = silentInput else {
                 micLive = false
-                updateUI()
-                return
+                updateStatusIcon()
+                if interactive { SetupGuide.show(needsBlackHole: true) }
+                return false
             }
-            micLive = false
-            setInputMuted(silent, true)
-            mutedSilentDevice = silent
+            muter.set(silent, muted: true)
             setDefault(kAudioHardwarePropertyDefaultInputDevice, silent)
+            micLive = false
         }
-        if let btOut { setDefault(kAudioHardwarePropertyDefaultOutputDevice, btOut) }
 
-        updateUI()
-        if sound { NSSound(named: live ? "Pop" : "Bottle")?.play() }
+        if interactive, let headset { setDefault(kAudioHardwarePropertyDefaultOutputDevice, headset.output) }
+        updateStatusIcon()
+        return true
     }
 
-    private func updateUI() {
-        statusItem.button?.title = micLive ? "🎙️" : "🎧"
-        stateItem.title = micLive ? "Mic ON — HFP (call mode)" : "Mic OFF — A2DP (HD sound)"
-        toggleItem.title = micLive ? "Turn Mic OFF (HD sound)" : "Turn Mic ON"
+    private var keepsHDWhileTalking: Bool { talkMic != nil }
+
+    private var stateTitle: String { micLive ? "Mic ON" : "Mic OFF" }
+    private var stateSubtitle: String {
+        if !micLive { return "HD sound" }
+        return keepsHDWhileTalking ? "HD sound · Mac mic" : "Call mode"
     }
 
-    /// macOS often grabs the headset mic on reconnect. While Mic OFF, push it back.
-    private func watchDefaultInput() {
-        var a = addr(kAudioHardwarePropertyDefaultInputDevice)
-        AudioObjectAddPropertyListenerBlock(systemObject, &a, .main) { [weak self] _, _ in
-            guard let self, !self.micLive else { return }
-            if isBluetooth(getDefault(kAudioHardwarePropertyDefaultInputDevice)) {
-                self.setMic(live: false, sound: false)
+    private func showHUD() {
+        HUD.shared.show(micOn: micLive, title: stateTitle, subtitle: stateSubtitle)
+        NSSound(named: micLive ? "Pop" : "Bottle")?.play()
+    }
+
+    private func updateStatusIcon() {
+        guard let button = statusItem.button else { return }
+        let symbol = micLive ? "mic.fill" : "headphones"
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: stateTitle)
+        image?.isTemplate = true
+        button.image = image
+        button.contentTintColor = micLive ? .systemGreen : nil
+        button.toolTip = "\(stateTitle) — \(stateSubtitle)\nClick or ⌃⌥M to switch · Right-click for settings"
+    }
+
+    // MARK: Menu bar
+
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            statusItem.menu = menu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            toggle()
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        let state = NSMenuItem(title: "\(micLive ? "🎙️" : "🎧")  \(stateTitle) — \(stateSubtitle)",
+                               action: nil, keyEquivalent: "")
+        state.isEnabled = false
+        menu.addItem(state)
+        let toggleItem = item(micLive ? "Turn Mic OFF" : "Turn Mic ON", #selector(toggle))
+        toggleItem.keyEquivalent = "m"
+        toggleItem.keyEquivalentModifierMask = [.control, .option]
+        menu.addItem(toggleItem)
+
+        menu.addItem(.separator())
+        menu.addItem(header("Headset"))
+        let headsets = connectedHeadsets()
+        let active = activeHeadset
+        if headsets.isEmpty {
+            menu.addItem(header("   No Bluetooth headset connected"))
+        }
+        for h in headsets {
+            let i = item(h.name + (h.input == nil ? "  (no mic)" : ""), #selector(pickHeadset(_:)))
+            i.representedObject = h.key
+            i.state = h.key == active?.key ? .on : .off
+            menu.addItem(i)
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(header("Talk Using"))
+        let headsetMic = item("Headset mic  (call quality)", #selector(pickTalkMic(_:)))
+        headsetMic.state = talkMic == nil ? .on : .off
+        menu.addItem(headsetMic)
+        for mic in macMicrophones() {
+            let i = item("\(deviceName(mic))  (keeps HD sound)", #selector(pickTalkMic(_:)))
+            i.representedObject = deviceUID(mic)
+            i.state = Settings.talkMicUID == deviceUID(mic) ? .on : .off
+            menu.addItem(i)
+        }
+
+        menu.addItem(.separator())
+        if #available(macOS 13.0, *) {
+            let login = item("Open at Login", #selector(toggleOpenAtLogin))
+            login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+            menu.addItem(login)
+        }
+        menu.addItem(item("Setup Guide…", #selector(showGuide)))
+        menu.addItem(item("About MicSwitch", #selector(showAbout)))
+        menu.addItem(item("GitHub…", #selector(openGitHub)))
+        menu.addItem(.separator())
+        let quit = item("Quit MicSwitch", #selector(quit))
+        quit.keyEquivalent = "q"
+        menu.addItem(quit)
+    }
+
+    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        i.target = self
+        return i
+    }
+
+    private func header(_ title: String) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        i.isEnabled = false
+        return i
+    }
+
+    @objc private func pickHeadset(_ sender: NSMenuItem) {
+        Settings.headsetKey = sender.representedObject as? String
+        apply(live: micLive)
+    }
+
+    @objc private func pickTalkMic(_ sender: NSMenuItem) {
+        if let old = talkMic { muter.set(old, muted: false) }
+        Settings.talkMicUID = sender.representedObject as? String
+        apply(live: micLive)
+    }
+
+    @available(macOS 13.0, *)
+    @objc private func toggleOpenAtLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            alert("Couldn't change Open at Login.\n\nAdd MicSwitch yourself in System Settings → General → Login Items.")
+        }
+    }
+
+    // MARK: Keeping the routing right
+
+    /// macOS grabs a headset's mic when it connects, and apps sometimes change the default.
+    /// Re-apply the current state whenever that happens.
+    private func watchAudioDevices() {
+        var input = addr(kAudioHardwarePropertyDefaultInputDevice)
+        AudioObjectAddPropertyListenerBlock(systemObject, &input, .main) { [weak self] _, _ in
+            guard let self else { return }
+            let current = getDefault(kAudioHardwarePropertyDefaultInputDevice)
+            let headsetMicExpected = self.micLive && self.talkMic == nil
+            if isBluetooth(current) && !headsetMicExpected {
+                self.apply(live: self.micLive, interactive: false)
             }
         }
-        var d = addr(kAudioHardwarePropertyDevices)
-        AudioObjectAddPropertyListenerBlock(systemObject, &d, .main) { [weak self] _, _ in
-            guard let self, !self.micLive else { return }
-            // Neckband (re)connected: re-apply Mic OFF after macOS finishes its own routing.
+        var devices = addr(kAudioHardwarePropertyDevices)
+        AudioObjectAddPropertyListenerBlock(systemObject, &devices, .main) { [weak self] _, _ in
+            guard let self else { return }
+            let wasLive = self.micLive
+            // Let macOS finish its own routing for the new/removed device first.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                if !self.micLive { self.setMic(live: false, sound: false) }
+                guard self.micLive == wasLive else { return }
+                if !self.apply(live: wasLive, interactive: false), wasLive {
+                    self.apply(live: false, interactive: false)   // headset gone: fall back to Mic OFF
+                }
             }
         }
     }
+
+    // MARK: Hotkey
 
     private func registerHotKey() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
@@ -213,6 +451,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
+    // MARK: Misc
+
     private func alert(_ text: String) {
         NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
@@ -221,9 +461,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.runModal()
     }
 
+    @objc private func showGuide() { SetupGuide.show(needsBlackHole: needsBlackHole) }
+
     @objc private func showAbout() {
         let credits = NSAttributedString(
-            string: "Keeps your Bluetooth headset in HD (A2DP) while the mic is off.\nHotkey: Control + Option + M\n\nby rejoanafridi · rejoanafridi93@gmail.com\nMIT License",
+            string: "Keeps any Bluetooth headset in HD (A2DP) while your mic is off.\nClick the menu bar icon or press ⌃⌥M.\n\nby rejoanafridi · rejoanafridi93@gmail.com\nMIT License",
             attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
@@ -233,10 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(URL(string: "https://github.com/rejoanafridi/micswitch")!)
     }
 
-    @objc private func quit() {
-        if let dev = mutedSilentDevice { setInputMuted(dev, false) }
-        NSApp.terminate(nil)
-    }
+    @objc private func quit() { NSApp.terminate(nil) }
 }
 
 // MARK: - Entry point
@@ -245,11 +484,20 @@ if CommandLine.arguments.contains("--list") {
     for id in allDevices() {
         let ins = channelCount(id, kAudioDevicePropertyScopeInput)
         let outs = channelCount(id, kAudioDevicePropertyScopeOutput)
-        print("\(deviceName(id)) — in:\(ins) out:\(outs) bluetooth:\(isBluetooth(id))")
+        print("\(deviceName(id)) — in:\(ins) out:\(outs) bluetooth:\(isBluetooth(id)) uid:\(deviceUID(id))")
     }
-    print("Headset in : \(pickBluetooth(kAudioDevicePropertyScopeInput).map(deviceName) ?? "none")")
-    print("Headset out: \(pickBluetooth(kAudioDevicePropertyScopeOutput).map(deviceName) ?? "none")")
-    print("Mic-OFF input: \(pickSilentInput().map(deviceName) ?? "none — install BlackHole")")
+    for h in connectedHeadsets() {
+        print("Headset: \(h.name) [\(h.key)] mic:\(h.input.map { _ in "yes" } ?? "no")")
+    }
+    print("Mac mics: \(macMicrophones().map(deviceName))")
+    print("Mic-OFF input: \((blackHole() ?? macMicrophones().first).map(deviceName) ?? "none — install BlackHole")")
+    exit(0)
+}
+
+// Only one copy at a time (e.g. Login Items + manual launch).
+if let bundleID = Bundle.main.bundleIdentifier,
+   NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+       .contains(where: { $0 != NSRunningApplication.current }) {
     exit(0)
 }
 
