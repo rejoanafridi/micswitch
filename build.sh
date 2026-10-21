@@ -1,0 +1,29 @@
+#!/bin/zsh
+# Builds MicSwitch.app next to this script.
+set -e
+cd "${0:A:h}"
+
+APP=MicSwitch.app
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS"
+
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>MicSwitch</string>
+    <key>CFBundleIdentifier</key><string>dev.rejoan.micswitch</string>
+    <key>CFBundleExecutable</key><string>MicSwitch</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>LSUIElement</key><true/>
+</dict>
+</plist>
+PLIST
+
+swiftc -O main.swift -o "$APP/Contents/MacOS/MicSwitch" \
+    -framework Cocoa -framework CoreAudio -framework Carbon
+codesign --force -s - "$APP"
+echo "Built $PWD/$APP"
