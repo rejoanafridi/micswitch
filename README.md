@@ -47,6 +47,7 @@ MicSwitch sits in the menu bar and decides **which microphone the system uses**:
 - **Talk Using**: talk through the headset mic, or through a Mac/USB mic so the headset **never leaves HD**
 - **Several headsets?** Pick which one to manage from the right-click menu; by default it follows whatever is playing sound
 - **Self-healing**: if macOS grabs the headset mic on its own (reconnects, other apps), MicSwitch puts it back
+- **Tells you who's to blame**: if an app (e.g. Discord) opens the headset mic directly, MicSwitch names the app and shows the one-line fix
 - **First-launch setup guide** with the 3 things you need to know
 - **Open at Login** from the menu, About window, single instance
 - Native Swift, no dependencies, no microphone access needed
@@ -105,7 +106,7 @@ This prints every audio device and what MicSwitch picked for the headset and for
 | `Mic-OFF input: none` | Install BlackHole (see Requirements), then restart audio with `sudo killall coreaudiod` |
 | "No Bluetooth headset is connected" | Connect your earbuds or neckband first |
 | "… has no microphone" | Right-click → **Talk Using** → pick your Mac's mic |
-| Still sounds bad with 🎧 | Check that the call app's input is **Default** and not the headset |
+| Still sounds bad with 🎧 / "⚠️ Discord is keeping your headset in call mode" | That app's input is set straight to the headset, which bypasses MicSwitch. In the app: **Settings → Voice & Video → Input Device → Default**. MicSwitch detects this and names the app (macOS 14+) |
 
 ## Project layout
 

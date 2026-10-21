@@ -176,6 +176,43 @@ func blackHole() -> AudioDeviceID? {
     }
 }
 
+func isRunningSomewhere(_ id: AudioDeviceID) -> Bool {
+    var a = addr(kAudioDevicePropertyDeviceIsRunningSomewhere)
+    var value: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    return AudioObjectGetPropertyData(id, &a, 0, nil, &size, &value) == noErr && value != 0
+}
+
+/// Names of apps recording from `device` right now ("Discord", "zoom.us"...). macOS 14+.
+func appsRecording(from device: AudioDeviceID) -> [String] {
+    guard #available(macOS 14.0, *) else { return [] }
+    var list = addr(kAudioHardwarePropertyProcessObjectList)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(systemObject, &list, 0, nil, &size) == noErr else { return [] }
+    var processes = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(systemObject, &list, 0, nil, &size, &processes) == noErr else { return [] }
+
+    var names: [String] = []
+    for process in processes {
+        var devicesAddr = addr(kAudioProcessPropertyDevices, kAudioObjectPropertyScopeInput)
+        var dsize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(process, &devicesAddr, 0, nil, &dsize) == noErr, dsize > 0 else { continue }
+        var devices = [AudioObjectID](repeating: 0, count: Int(dsize) / MemoryLayout<AudioObjectID>.size)
+        AudioObjectGetPropertyData(process, &devicesAddr, 0, nil, &dsize, &devices)
+        guard devices.contains(device) else { continue }
+
+        var pidAddr = addr(kAudioProcessPropertyPID)
+        var pid: pid_t = 0
+        var psize = UInt32(MemoryLayout<pid_t>.size)
+        AudioObjectGetPropertyData(process, &pidAddr, 0, nil, &psize, &pid)
+        // Helpers ("Discord Helper (Renderer)") are reported under the main app's name.
+        let raw = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "An app"
+        let name = raw.components(separatedBy: " Helper").first ?? raw
+        if !names.contains(name) { names.append(name) }
+    }
+    return names
+}
+
 // MARK: - Settings
 
 enum Settings {
@@ -202,6 +239,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let muter = InputMuter()
     private var hotKeyRef: EventHotKeyRef?
     private var micLive = false
+    /// Apps that open the headset mic directly (input not set to "Default"), keeping it in call mode.
+    private var micGrabbers: [String] = []
+    private var warnedGrabbers: Set<String> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -215,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         registerHotKey()
         watchAudioDevices()
+        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.checkMicGrabbers() }
         apply(live: false)
         SetupGuide.showIfFirstLaunch(needsBlackHole: needsBlackHole)
     }
@@ -331,6 +372,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.keyEquivalent = "m"
         toggleItem.keyEquivalentModifierMask = [.control, .option]
         menu.addItem(toggleItem)
+        if !micGrabbers.isEmpty {
+            let warning = item("⚠️ \(micGrabbers.joined(separator: ", ")) is keeping your headset in call mode…",
+                               #selector(showGrabberHelp))
+            menu.addItem(warning)
+        }
 
         menu.addItem(.separator())
         menu.addItem(header("Headset"))
@@ -437,6 +483,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// MicSwitch only controls the *system default* mic. An app whose input is set straight to
+    /// the headset bypasses that, so find it and tell the user how to fix it (once per app).
+    private func checkMicGrabbers() {
+        let headsetMicExpected = micLive && talkMic == nil
+        guard !headsetMicExpected, let input = activeHeadset?.input, isRunningSomewhere(input) else {
+            micGrabbers = []
+            warnedGrabbers = []
+            return
+        }
+        micGrabbers = appsRecording(from: input)
+        if micGrabbers.isEmpty { micGrabbers = ["Another app"] }
+        if !Set(micGrabbers).isSubset(of: warnedGrabbers) {
+            warnedGrabbers.formUnion(micGrabbers)
+            showGrabberHelp()
+        }
+    }
+
+    @objc private func showGrabberHelp() {
+        guard let app = micGrabbers.first else { return }
+        let headsetName = activeHeadset?.name ?? "your headset"
+        alert("""
+        \(app) is using “\(headsetName)” as its microphone directly, so the headset is stuck in call mode (low quality) no matter what MicSwitch does.
+
+        Fix it once in \(app):
+        Settings → Voice & Video (or Audio) → Input Device → “Default”
+
+        After that, MicSwitch controls the mic and you get HD sound while it's off.
+        """)
+    }
+
     // MARK: Hotkey
 
     private func registerHotKey() {
@@ -488,6 +564,9 @@ if CommandLine.arguments.contains("--list") {
     }
     for h in connectedHeadsets() {
         print("Headset: \(h.name) [\(h.key)] mic:\(h.input.map { _ in "yes" } ?? "no")")
+        if let input = h.input, isRunningSomewhere(input) {
+            print("  ⚠️ headset mic in use by: \(appsRecording(from: input).joined(separator: ", "))")
+        }
     }
     print("Mac mics: \(macMicrophones().map(deviceName))")
     print("Mic-OFF input: \((blackHole() ?? macMicrophones().first).map(deviceName) ?? "none — install BlackHole")")
