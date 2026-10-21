@@ -351,12 +351,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
-        let symbol = micLive ? "mic.fill" : "headphones"
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: stateTitle)
-        image?.isTemplate = true
-        button.image = image
-        button.contentTintColor = micLive ? .systemGreen : nil
+        if micLive {
+            button.image = micOnBadge()
+        } else {
+            let image = NSImage(systemSymbolName: "headphones", accessibilityDescription: stateTitle)
+            image?.isTemplate = true
+            button.image = image
+        }
+        button.contentTintColor = nil
         button.toolTip = "\(stateTitle) — \(stateSubtitle)\nClick or ⌃⌥M to switch · Right-click for settings"
+    }
+
+    /// Green pill with a white mic, like macOS's own orange mic indicator: readable on
+    /// light and dark menu bars (a tinted template icon gets dimmed on dark ones).
+    private func micOnBadge() -> NSImage {
+        let size = NSSize(width: 30, height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.systemGreen.setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8).fill()
+            let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+            if let mic = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(config) {
+                let r = NSRect(x: (rect.width - mic.size.width) / 2, y: (rect.height - mic.size.height) / 2,
+                               width: mic.size.width, height: mic.size.height)
+                mic.draw(in: r)
+            }
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = "Mic ON"
+        return image
     }
 
     // MARK: Menu bar
@@ -383,6 +408,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.keyEquivalent = "m"
         toggleItem.keyEquivalentModifierMask = [.control, .option]
         menu.addItem(toggleItem)
+        if needsBlackHole {
+            menu.addItem(item("⚠️ Install silent mic driver (1 click)…", #selector(installDriver)))
+        }
         if !micGrabbers.isEmpty {
             let warning = item("⚠️ \(micGrabbers.joined(separator: ", ")) is keeping your headset in call mode…",
                                #selector(showGrabberHelp))
@@ -579,6 +607,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         a.informativeText = text
         a.runModal()
     }
+
+    @objc private func installDriver() { DriverInstaller.install() }
 
     @objc private func showGuide() { SetupGuide.show(needsBlackHole: needsBlackHole) }
 

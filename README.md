@@ -48,6 +48,8 @@ MicSwitch sits in the menu bar and decides **which microphone the system uses**:
 - **Several headsets?** Pick which one to manage from the right-click menu; by default it follows whatever is playing sound
 - **Self-healing**: if macOS grabs the headset mic on its own (reconnects, other apps), MicSwitch puts it back
 - **Tells you who's to blame**: if an app (e.g. Discord) opens the headset mic directly, MicSwitch names the app and shows the one-line fix
+- **Auto mode for Discord**: mute/unmute in Discord as usual and MicSwitch follows (needs Accessibility permission once)
+- **One-click driver install** on Macs without a mic
 - **First-launch setup guide** with the 3 things you need to know
 - **Open at Login** from the menu, About window, single instance
 - Native Swift, no dependencies, no microphone access needed
@@ -55,11 +57,7 @@ MicSwitch sits in the menu bar and decides **which microphone the system uses**:
 ## Requirements
 
 - macOS 12 or later
-- A non-Bluetooth input for "mic off". MacBooks use the built-in mic (muted). **Macs without a mic (Mac mini, Mac Studio, Mac Pro)** need the free [BlackHole](https://existential.audio/blackhole/) driver:
-
-```bash
-brew install --cask blackhole-2ch
-```
+- A silent input for "mic off". MacBooks can use the built-in mic (muted). **Macs without a mic (Mac mini, Mac Studio, Mac Pro)** need the free [BlackHole](https://existential.audio/blackhole/) driver. **MicSwitch installs it for you in one click**: it downloads the official package, checks that it is signed by Existential Audio and notarized by Apple, and asks for your Mac password once. Prefer the terminal? `brew install --cask blackhole-2ch`
 
 ## Install
 
@@ -91,7 +89,19 @@ Right-click the icon to:
 
 Switching to the headset mic takes 1–2 seconds and you may hear a short glitch. That is the headset changing Bluetooth profiles.
 
-> **Why not automatic?** Call apps keep the mic open even while you are muted in them, and they don't tell macOS when you mute. So no app can see Discord's mute button. MicSwitch's one click (or ⌃⌥M) replaces it.
+### Auto mode (Discord)
+
+Right-click → **Auto: follow Discord's mute button**, then allow MicSwitch in **System Settings → Privacy & Security → Accessibility**. From then on:
+
+| In Discord | MicSwitch |
+|---|---|
+| In a call, unmuted | 🎙️ Mic ON |
+| In a call, muted | 🎧 Mic OFF, HD |
+| Not in a call | 🎧 Mic OFF, HD |
+
+Discord keeps recording even while muted, so audio alone can't show your mute state. MicSwitch reads Discord's Mute switch through the Accessibility API instead. Other apps (Zoom, Meet...) use the click or ⌃⌥M. A log is kept at `~/Library/Logs/MicSwitch.log`.
+
+> If you rebuild MicSwitch from source, macOS treats it as a new app: remove and re-add it under Accessibility.
 
 ## Troubleshooting
 
@@ -103,7 +113,7 @@ This prints every audio device and what MicSwitch picked for the headset and for
 
 | Message | Fix |
 |---|---|
-| `Mic-OFF input: none` | Install BlackHole (see Requirements), then restart audio with `sudo killall coreaudiod` |
+| `Mic-OFF input: none` | Right-click → **Install silent mic driver (1 click)** |
 | "No Bluetooth headset is connected" | Connect your earbuds or neckband first |
 | "… has no microphone" | Right-click → **Talk Using** → pick your Mac's mic |
 | Still sounds bad with 🎧 / "⚠️ Discord is keeping your headset in call mode" | That app's input is set straight to the headset, which bypasses MicSwitch. In the app: **Settings → Voice & Video → Input Device → Default**. MicSwitch detects this and names the app (macOS 14+) |
@@ -114,6 +124,8 @@ This prints every audio device and what MicSwitch picked for the headset and for
 main.swift            the app: devices, switching, menu bar
 HUD.swift             on-screen Mic ON / OFF popup
 SetupGuide.swift      first-launch guide
+AutoMode.swift        Auto mode: follows Discord's mute button
+DriverInstaller.swift one-click BlackHole install (signature-checked)
 build.sh              builds MicSwitch.app
 icon/make_icon.swift  draws the app icon
 icon/AppIcon.icns     generated icon

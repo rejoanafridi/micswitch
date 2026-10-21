@@ -1,14 +1,12 @@
 // SetupGuide — a short first-launch guide, also openable from the menu.
 //
 // Plain NSAlert (it shows the app icon automatically). If the Mac has no
-// built-in microphone, it also explains how to get the free BlackHole driver.
+// built-in microphone, it offers a one-click install of the free BlackHole driver.
 
 import Cocoa
 
 enum SetupGuide {
     private static let shownKey = "didShowSetupGuide"
-    private static let blackHoleURL = URL(string: "https://existential.audio/blackhole/")!
-    private static let installCommand = "brew install --cask blackhole-2ch"
 
     /// Shows the guide once ever (UserDefaults key "didShowSetupGuide").
     static func showIfFirstLaunch(needsBlackHole: Bool) {
@@ -36,8 +34,10 @@ enum SetupGuide {
 
             ────────────────────
 
-            ⚠️ This Mac has no built-in microphone.
-            Install the free BlackHole driver to keep HD sound while the mic is off.
+            ⚠️ One more step: this Mac has no built-in microphone.
+            MicSwitch needs a free "silent mic" driver (BlackHole) so your headset can stay in HD while the mic is off.
+
+            Click "Install Now". macOS asks for your Mac password once. That's it.
             """
         }
 
@@ -45,22 +45,16 @@ enum SetupGuide {
         alert.messageText = "Welcome to MicSwitch"
         alert.informativeText = text
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Got it")
         if needsBlackHole {
-            alert.addButton(withTitle: "Get BlackHole")
-            alert.addButton(withTitle: "Copy Install Command")
+            alert.addButton(withTitle: "Install Now")
+            alert.addButton(withTitle: "Later")
+        } else {
+            alert.addButton(withTitle: "Got it")
         }
 
         NSApp.activate(ignoringOtherApps: true)
-        switch alert.runModal() {
-        case .alertSecondButtonReturn:
-            NSWorkspace.shared.open(blackHoleURL)
-        case .alertThirdButtonReturn:
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            pb.setString(installCommand, forType: .string)
-        default:
-            break
+        if alert.runModal() == .alertFirstButtonReturn && needsBlackHole {
+            DriverInstaller.install()
         }
     }
 }
