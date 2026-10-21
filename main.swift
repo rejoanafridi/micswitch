@@ -132,6 +132,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(toggleItem)
         menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "About MicSwitch", action: #selector(showAbout), keyEquivalent: ""))
+        menu.items.last?.target = self
+        menu.addItem(NSMenuItem(title: "GitHub…", action: #selector(openGitHub), keyEquivalent: ""))
+        menu.items.last?.target = self
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit MicSwitch", action: #selector(quit), keyEquivalent: "q"))
         menu.items.last?.target = self
         statusItem.menu = menu
@@ -214,6 +219,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.messageText = "MicSwitch"
         a.informativeText = text
         a.runModal()
+    }
+
+    @objc private func showAbout() {
+        let credits = NSAttributedString(
+            string: "Keeps your Bluetooth headset in HD (A2DP) while the mic is off.\nHotkey: Control + Option + M\n\nby rejoanafridi · rejoanafridi93@gmail.com\nMIT License",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    }
+
+    @objc private func openGitHub() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/rejoanafridi/micswitch")!)
     }
 
     @objc private func quit() {
