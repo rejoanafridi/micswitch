@@ -40,6 +40,8 @@ final class DiscordMuteWatcher {
     private var lastSearch = Date.distantPast
     private var reported: Bool?
     private var pending: Bool?
+    private var notRecordingSince: Date?
+    private let callEndGrace: TimeInterval = 3
 
     static var hasPermission: Bool { AXIsProcessTrusted() }
 
@@ -63,6 +65,7 @@ final class DiscordMuteWatcher {
         muteSwitch = nil
         reported = nil
         pending = nil
+        notRecordingSince = nil
     }
 
     /// Discord muted state if we can see its Mute switch, nil if not (yet).
@@ -92,7 +95,16 @@ final class DiscordMuteWatcher {
                                         : "Found Discord Mute switch (muted: \(discordMuted.map(String.init) ?? "?"))")
         }
 
-        guard isDiscordRecording() else { settle(false); return }   // not in a call
+        // Discord stops recording for a moment whenever the input device changes (which we
+        // cause ourselves), so only treat it as "left the call" after a few quiet seconds.
+        if isDiscordRecording() {
+            notRecordingSince = nil
+        } else {
+            let since = notRecordingSince ?? Date()
+            notRecordingSince = since
+            if Date().timeIntervalSince(since) >= callEndGrace { settle(false) }
+            return
+        }
         guard let muted = discordMuted else { return }               // can't see the switch: leave it to the user
         settle(!muted)
     }
