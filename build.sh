@@ -17,7 +17,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>dev.rejoan.micswitch</string>
     <key>CFBundleExecutable</key><string>MicSwitch</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.2</string>
+    <key>CFBundleShortVersionString</key><string>2.3</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>LSUIElement</key><true/>
     <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -26,7 +26,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-swiftc -O main.swift HUD.swift SetupGuide.swift AutoMode.swift DriverInstaller.swift -o "$APP/Contents/MacOS/MicSwitch" \
-    -framework Cocoa -framework CoreAudio -framework Carbon -framework ServiceManagement
+# Universal binary: Apple Silicon + Intel.
+SOURCES=(main.swift HUD.swift SetupGuide.swift AutoMode.swift DriverInstaller.swift)
+FRAMEWORKS=(-framework Cocoa -framework CoreAudio -framework Carbon -framework ServiceManagement)
+TMP=$(mktemp -d)
+for arch in arm64 x86_64; do
+    swiftc -O -target $arch-apple-macos12.0 "${SOURCES[@]}" -o "$TMP/MicSwitch-$arch" "${FRAMEWORKS[@]}"
+done
+lipo -create "$TMP/MicSwitch-arm64" "$TMP/MicSwitch-x86_64" -output "$APP/Contents/MacOS/MicSwitch"
+rm -rf "$TMP"
 codesign --force -s - "$APP"
 echo "Built $PWD/$APP"

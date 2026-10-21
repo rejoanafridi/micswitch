@@ -71,6 +71,14 @@ open ~/Applications/MicSwitch.app
 
 **Start at login:** right-click the menu bar icon → **Open at Login**.
 
+**Make a shareable DMG** (universal: Apple Silicon + Intel):
+
+```bash
+./release.sh   # → dist/MicSwitch-<version>.dmg
+```
+
+MicSwitch isn't notarized by Apple, so the first time someone opens it macOS blocks it. They open **System Settings → Privacy & Security** and click **Open Anyway** (the DMG has a "How to install" note).
+
 ## Usage
 
 1. In your call app (Discord: **Settings → Voice & Video**), set
@@ -141,7 +149,8 @@ HUD.swift             on-screen Mic ON / OFF popup
 SetupGuide.swift      first-launch guide
 AutoMode.swift        Auto mode: follows any call app's mute button
 DriverInstaller.swift one-click BlackHole install (signature-checked)
-build.sh              builds MicSwitch.app
+build.sh              builds MicSwitch.app (universal)
+release.sh            packages dist/MicSwitch-<version>.dmg
 icon/make_icon.swift  draws the app icon
 icon/AppIcon.icns     generated icon
 ```
