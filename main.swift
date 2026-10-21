@@ -223,6 +223,11 @@ enum Settings {
         set { d.set(newValue, forKey: "headsetKey") }
     }
     /// UID of the Mac/USB mic to talk with; nil = the headset's own mic.
+    /// Follow Discord's own mute button instead of clicking MicSwitch.
+    static var autoMode: Bool {
+        get { d.bool(forKey: "autoMode") }
+        set { d.set(newValue, forKey: "autoMode") }
+    }
     static var talkMicUID: String? {
         get { d.string(forKey: "talkMicUID") }
         set { d.set(newValue, forKey: "talkMicUID") }
@@ -242,6 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Apps that open the headset mic directly (input not set to "Default"), keeping it in call mode.
     private var micGrabbers: [String] = []
     private var warnedGrabbers: Set<String> = []
+    private let autoWatcher = DiscordMuteWatcher()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -256,6 +262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         registerHotKey()
         watchAudioDevices()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.checkMicGrabbers() }
+        autoWatcher.onChange = { [weak self] talking in
+            guard let self, talking != self.micLive else { return }
+            if self.apply(live: talking) { self.showHUD() }
+        }
+        if Settings.autoMode { autoWatcher.start() }
         apply(live: false)
         SetupGuide.showIfFirstLaunch(needsBlackHole: needsBlackHole)
     }
@@ -329,8 +340,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var stateTitle: String { micLive ? "Mic ON" : "Mic OFF" }
     private var stateSubtitle: String {
-        if !micLive { return "HD sound" }
-        return keepsHDWhileTalking ? "HD sound · Mac mic" : "Call mode"
+        let base = !micLive ? "HD sound" : keepsHDWhileTalking ? "HD sound · Mac mic" : "Call mode"
+        return Settings.autoMode ? base + " · Auto" : base
     }
 
     private func showHUD() {
@@ -376,6 +387,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let warning = item("⚠️ \(micGrabbers.joined(separator: ", ")) is keeping your headset in call mode…",
                                #selector(showGrabberHelp))
             menu.addItem(warning)
+        }
+
+        menu.addItem(.separator())
+        let auto = item("Auto: follow Discord's mute button", #selector(toggleAutoMode))
+        auto.state = Settings.autoMode ? .on : .off
+        menu.addItem(auto)
+        if Settings.autoMode && !DiscordMuteWatcher.hasPermission {
+            menu.addItem(item("   ⚠️ Allow Accessibility to finish setup…", #selector(askAccessibility)))
         }
 
         menu.addItem(.separator())
@@ -498,6 +517,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             warnedGrabbers.formUnion(micGrabbers)
             showGrabberHelp()
         }
+    }
+
+    // MARK: Auto mode
+
+    @objc private func toggleAutoMode() {
+        Settings.autoMode.toggle()
+        if Settings.autoMode {
+            autoWatcher.start()
+            if !DiscordMuteWatcher.hasPermission { askAccessibility() }
+        } else {
+            autoWatcher.stop()
+        }
+        updateStatusIcon()
+    }
+
+    @objc private func askAccessibility() {
+        alert("""
+        Auto mode reads Discord's mute button, so MicSwitch needs Accessibility permission (one time).
+
+        Next: System Settings opens → Privacy & Security → Accessibility → turn on “MicSwitch”.
+
+        Auto mode starts by itself as soon as it's allowed. Then just mute/unmute in Discord as usual.
+        """)
+        DiscordMuteWatcher.requestPermission()
     }
 
     @objc private func showGrabberHelp() {

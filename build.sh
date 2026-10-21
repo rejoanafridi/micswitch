@@ -17,7 +17,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>dev.rejoan.micswitch</string>
     <key>CFBundleExecutable</key><string>MicSwitch</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.0</string>
+    <key>CFBundleShortVersionString</key><string>2.1</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>LSUIElement</key><true/>
     <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -26,7 +26,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-swiftc -O main.swift HUD.swift SetupGuide.swift -o "$APP/Contents/MacOS/MicSwitch" \
+swiftc -O main.swift HUD.swift SetupGuide.swift AutoMode.swift -o "$APP/Contents/MacOS/MicSwitch" \
     -framework Cocoa -framework CoreAudio -framework Carbon -framework ServiceManagement
 codesign --force -s - "$APP"
 echo "Built $PWD/$APP"
