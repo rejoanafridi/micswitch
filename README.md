@@ -48,7 +48,7 @@ MicSwitch sits in the menu bar and decides **which microphone the system uses**:
 - **Several headsets?** Pick which one to manage from the right-click menu; by default it follows whatever is playing sound
 - **Self-healing**: if macOS grabs the headset mic on its own (reconnects, other apps), MicSwitch puts it back
 - **Tells you who's to blame**: if an app (e.g. Discord) opens the headset mic directly, MicSwitch names the app and shows the one-line fix
-- **Auto mode for Discord**: mute/unmute in Discord as usual and MicSwitch follows (needs Accessibility permission once)
+- **Auto mode for any call app**: mute/unmute in Discord, Zoom, Slack, Teams, Google Meet, FaceTime… as usual and MicSwitch follows (needs Accessibility permission once)
 - **One-click driver install** on Macs without a mic
 - **First-launch setup guide** with the 3 things you need to know
 - **Open at Login** from the menu, About window, single instance
@@ -89,17 +89,32 @@ Right-click the icon to:
 
 Switching to the headset mic takes 1–2 seconds and you may hear a short glitch. That is the headset changing Bluetooth profiles.
 
-### Auto mode (Discord)
+### Auto mode (any call app)
 
-Right-click → **Auto: follow Discord's mute button**, then allow MicSwitch in **System Settings → Privacy & Security → Accessibility**. From then on:
+Right-click → **Auto: follow my call app's mute button**, then allow MicSwitch in **System Settings → Privacy & Security → Accessibility**. From then on, just use your call app's own mute button:
 
-| In Discord | MicSwitch |
+| In your call app | MicSwitch |
 |---|---|
 | In a call, unmuted | 🎙️ Mic ON |
 | In a call, muted | 🎧 Mic OFF, HD |
-| Not in a call | 🎧 Mic OFF, HD |
+| Not in a call | 🎧 Mic OFF, HD (after 3 s) |
 
-Discord keeps recording even while muted, so audio alone can't show your mute state. MicSwitch reads Discord's Mute switch through the Accessibility API instead. Other apps (Zoom, Meet...) use the click or ⌃⌥M. A log is kept at `~/Library/Logs/MicSwitch.log`.
+How it works:
+
+1. The **call app** is whichever app is recording from the mic. With Mic OFF it records silence from BlackHole, so MicSwitch knows you're in a call before you speak.
+2. MicSwitch finds that app's **Mute / Unmute** control through the Accessibility API. Many apps (Discord, Zoom) keep recording while muted, so audio alone can't tell.
+3. If an app has no readable mute control, MicSwitch treats "recording" as "unmuted". That is right for apps that release the mic when you mute (Google Meet does).
+
+| App | How mute is read |
+|---|---|
+| Discord | "Mute" switch ✅ tested |
+| Zoom | "Mute Audio / Unmute Audio" |
+| Microsoft Teams | "Mute / Unmute" |
+| Slack huddles | "Mute mic / Unmute mic" |
+| Google Meet (Chrome, Safari, Arc, Edge) | "Turn off / Turn on microphone"; the Meet tab must be visible in its window |
+| FaceTime, Webex, others | "Mute / Unmute", or recording state |
+
+Only Discord has been tested so far. The others are based on the labels those apps use. `~/Library/Logs/MicSwitch.log` shows which control was found in each app.
 
 > If you rebuild MicSwitch from source, macOS treats it as a new app: remove and re-add it under Accessibility.
 
@@ -124,7 +139,7 @@ This prints every audio device and what MicSwitch picked for the headset and for
 main.swift            the app: devices, switching, menu bar
 HUD.swift             on-screen Mic ON / OFF popup
 SetupGuide.swift      first-launch guide
-AutoMode.swift        Auto mode: follows Discord's mute button
+AutoMode.swift        Auto mode: follows any call app's mute button
 DriverInstaller.swift one-click BlackHole install (signature-checked)
 build.sh              builds MicSwitch.app
 icon/make_icon.swift  draws the app icon

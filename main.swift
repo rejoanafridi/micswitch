@@ -223,7 +223,7 @@ enum Settings {
         set { d.set(newValue, forKey: "headsetKey") }
     }
     /// UID of the Mac/USB mic to talk with; nil = the headset's own mic.
-    /// Follow Discord's own mute button instead of clicking MicSwitch.
+    /// Follow the call app's own mute button instead of clicking MicSwitch.
     static var autoMode: Bool {
         get { d.bool(forKey: "autoMode") }
         set { d.set(newValue, forKey: "autoMode") }
@@ -247,7 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Apps that open the headset mic directly (input not set to "Default"), keeping it in call mode.
     private var micGrabbers: [String] = []
     private var warnedGrabbers: Set<String> = []
-    private let autoWatcher = DiscordMuteWatcher()
+    private let autoWatcher = CallMuteWatcher()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -418,10 +418,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        let auto = item("Auto: follow Discord's mute button", #selector(toggleAutoMode))
+        let auto = item("Auto: follow my call app's mute button", #selector(toggleAutoMode))
         auto.state = Settings.autoMode ? .on : .off
         menu.addItem(auto)
-        if Settings.autoMode && !DiscordMuteWatcher.hasPermission {
+        if Settings.autoMode && !CallMuteWatcher.hasPermission {
             menu.addItem(item("   ⚠️ Allow Accessibility to finish setup…", #selector(askAccessibility)))
         }
 
@@ -553,7 +553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.autoMode.toggle()
         if Settings.autoMode {
             autoWatcher.start()
-            if !DiscordMuteWatcher.hasPermission { askAccessibility() }
+            if !CallMuteWatcher.hasPermission { askAccessibility() }
         } else {
             autoWatcher.stop()
         }
@@ -562,13 +562,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func askAccessibility() {
         alert("""
-        Auto mode reads Discord's mute button, so MicSwitch needs Accessibility permission (one time).
+        Auto mode reads the mute button of your call app (Discord, Zoom, Slack, Teams, Google Meet, FaceTime…), so MicSwitch needs Accessibility permission (one time).
 
         Next: System Settings opens → Privacy & Security → Accessibility → turn on “MicSwitch”.
 
-        Auto mode starts by itself as soon as it's allowed. Then just mute/unmute in Discord as usual.
+        Auto mode starts by itself as soon as it's allowed. Then just mute/unmute in your call app as usual.
         """)
-        DiscordMuteWatcher.requestPermission()
+        CallMuteWatcher.requestPermission()
     }
 
     @objc private func showGrabberHelp() {
